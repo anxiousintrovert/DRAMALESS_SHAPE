@@ -1,10 +1,29 @@
 # Changelog
 
-## 1.6.4 HOTFIX for 1.6.3
-- Fixed camera control issues (hopefully), also hotkeys Q and E are no longer claimed by this mod. 
-- Also increased max and min zoom distance in battle.
-- tried to address issues with an incomplete and therefore broken integration with BackPlatesUI.lua (by scrubbing all the references to it)
-- Nuked Horde mode from orbit because gently asking it to leave did not work and in fact caused softlocking in 1st and 3rd person.
+## 1.6.4
+- Fixed camera control issues; hotkeys Q and E are no longer claimed by this
+  mod, and the minimum and maximum battle-camera zoom distances were increased.
+- Removed the incomplete BackPlatesUI integration and Horde mode, which could
+  softlock first- and third-person modes.
+- Added a public, versioned battle-presentation API for every companion mod.
+  The four existing 2D-3D/STADIUM A/B choices remain the baselines and retain
+  their old stored values.
+- Added independent, persisted selectors for arena, Pokemon models, animations,
+  camera, effects, audio, announcer, HUD, overlay, complete screen, transitions
+  and catch-all presentation. A player can mix each asset from a different mod.
+- All mod providers have equal priority: choices sort alphabetically and only
+  the player's explicit selection wins. Selected assets safely fall back to
+  the chosen Dramaless baseline, never to another unselected mod.
+- Migrated Dramaless's own map/disc stages and Stadium models onto the public
+  provider path, including runtime decline/error fallback to Game Boy cards.
+- Added concrete lifecycle seams for imported world models, animation/effects,
+  camera replacement, canvas post-processing, audio/announcer event reactions,
+  HUD/overlays and complete battle-screen ownership.
+- Added dynamic option-schema refresh so providers registered by dependent mods
+  appear in both the in-game OPTIONS menu and the mod manager.
+- Added [`BATTLE_PRESETS.md`](BATTLE_PRESETS.md) and a standalone API regression
+  suite covering legacy values, mix-and-match selection, equal ordering,
+  inheritance, availability gates, saved selections and runtime fallback.
 
 ## 1.6.3
 - Merged [PR#4](https://github.com/artyrambles/DRAMALESS_SHAPE/pull/4#issue-5094930250) and [PR#7](https://github.com/artyrambles/DRAMALESS_SHAPE/pull/7#issue-5095950947) into the main branch, thanks to [anxiousintrovert](https://github.com/anxiousintrovert) for the contributions!

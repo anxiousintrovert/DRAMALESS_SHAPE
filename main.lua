@@ -90,6 +90,7 @@ local ChunkMesher = V.require("ChunkMesher")
 local VoxelGrid = V.require("VoxelGrid")
 local WorldCurve = V.require("WorldCurve")
 local OverworldBattle = V.require("OverworldBattle")
+local BattlePresets = V.require("BattlePresets")
 local BattleExit = V.require("BattleExit")
 local DayNight = V.require("DayNight")
 local DayTint = V.require("DayTint")
@@ -438,7 +439,11 @@ local SETTINGS = {
     .. "appear once the models have been built, and building them needs a "
     .. "Pokemon Stadium (US) 1.0 ROM of your own -- import it from the "
     .. "STADIUM ROM row, or drop it in the baseroms folder and restart. No "
-    .. "other version works: the reader is keyed to that one cartridge.",
+    .. "other version works: the reader is keyed to that one cartridge. "
+    .. "These four choices are the baseline. When companion mods register "
+    .. "battle assets, the BTL ARENA, BTL MODELS, BTL ANIM and related rows "
+    .. "below let each part come from a different mod; DEFAULT inherits this "
+    .. "baseline.",
     when = function() return not VR.enabled() end, full = true },
   -- Only offered while a fight can actually be staged on the map: with 3D-BTL
   -- off the engine draws the classic screen, which is this row's ON already,
@@ -530,6 +535,23 @@ local SETTINGS = {
     .. "legs and want the continuity.",
     when = function() return VR.enabled() end, full = true },
 }
+
+-- Companion mods register equal-standing providers after Dramaless loads.
+-- Each selector keeps DEFAULT first and grows its choice list in-place, so a
+-- player can mix an arena, models, animations, voice and UI from unrelated
+-- mods without choosing one all-or-nothing bundle. Rows with only DEFAULT are
+-- hidden from the in-game menu; their manager schema remains ready for late
+-- registrations and is updated by reference by ModSetting:replaceChoices().
+for _, asset in ipairs(BattlePresets.componentSettings()) do
+  local selector = asset.setting
+  SETTINGS[#SETTINGS + 1] = {
+    selector, asset.help,
+    when = function()
+      return stagedBattles() and selector:rungs() > 1
+    end,
+    full = true,
+  }
+end
 
 local schema = {}
 for _, entry in ipairs(SETTINGS) do
@@ -1115,7 +1137,29 @@ end
 -- shown.
 mod.events:on("battle.started", function(payload)
   OverworldBattle.ensure(payload and payload.battle)
+  OverworldBattle.event("battle.started", payload)
 end)
+
+-- Presentation providers consume stable semantic events instead of polling
+-- private BattleState fields. This is intentionally a presentation-only list:
+-- providers can react with animation, sound, speech, particles, camera work or
+-- UI, while battle rules and outcomes remain owned by the engine.
+local PRESENTATION_EVENTS = {
+  "battle.turn_started",
+  "battle.battler_switched",
+  "battle.turn_ended",
+  "battle.move_used",
+  "battle.fainted",
+  "battle.exp_gained",
+  "battle.ball_thrown",
+  "battle.damage_dealt",
+  "battle.status_inflicted",
+}
+for _, name in ipairs(PRESENTATION_EVENTS) do
+  mod.events:on(name, function(payload)
+    OverworldBattle.event(name, payload)
+  end)
+end
 
 -- Both mons face the camera, so the player's side wants its FRONT pic where
 -- the battle screen would have used the back one. The engine's own
@@ -1139,7 +1183,10 @@ end)
 
 -- Every ending path emits this, including a battle skipped before it drew,
 -- so this is where the map's cast comes back.
-mod.events:on("battle.ended", function()
+mod.events:on("battle.ended", function(payload)
+  -- End is delivered while providers are still alive so announcers,
+  -- transitions and overlays can observe it; finish then releases every slot.
+  OverworldBattle.event("battle.ended", payload)
   OverworldBattle.finish()
 end)
 
@@ -1211,3 +1258,55 @@ mod.exports.version = "1.6.4"
 -- exposed so a companion mod can pin its own tiles' shapes or read the
 -- camera without reaching into this mod's file layout
 mod.exports.lib = V
+
+-- Public, versioned battle-composition surface. A dependent mod reaches this
+-- through `mod.find("DRAMALESS_SHAPE").exports.battles`; it never has to know
+-- that OverworldBattle, Stadium or BattleScene are private files. The caller
+-- supplies its own manifest id so every preset is namespaced and equal-priority
+-- collisions are impossible by construction.
+mod.exports.battles = {
+  version = 1,
+  FALLBACK = BattlePresets.FALLBACK,
+  register = function(_, owner, id, definition)
+    return BattlePresets.register(owner, id, definition)
+  end,
+  registerComponent = function(_, owner, slot, id, definition)
+    return BattlePresets.registerComponent(owner, slot, id, definition)
+  end,
+  list = function() return BattlePresets.list() end,
+  componentList = function(_, slot)
+    return BattlePresets.componentList(slot)
+  end,
+  resolve = function(_, value, component, context)
+    return BattlePresets.resolve(value, component, context)
+  end,
+  current = function()
+    local value = OverworldBattle.setting:get()
+    return BattlePresets.id(value), BattlePresets.get(value)
+  end,
+  provider = function(_, method, ...)
+    return OverworldBattle.battlerCall(method, ...)
+  end,
+  -- Generic presentation components use the same safe invocation route as
+  -- the built-in renderer. These exports are useful to companion mods that
+  -- want to coordinate their own UI or inspect which fallback is active.
+  runtimeSlots = function() return BattlePresets.runtimeSlots() end,
+  selectableSlots = function() return BattlePresets.selectableSlots() end,
+  componentSelection = function(_, slot)
+    return BattlePresets.componentSelection(slot)
+  end,
+  component = function(_, slot, method, ...)
+    return OverworldBattle.componentCall(slot, method, ...)
+  end,
+  componentProvider = function(_, slot)
+    return OverworldBattle.componentProvider(slot)
+  end,
+}
+
+-- A dependent mod can fail after calling the export, which the engine cannot
+-- journal because the registry belongs to Dramaless. Once loading settles,
+-- remove registrations whose owners did not survive and refresh both option
+-- surfaces. This event also runs on hot reload.
+mod.events:on("mods.loaded", function()
+  BattlePresets.pruneInactive()
+end)

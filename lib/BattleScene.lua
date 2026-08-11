@@ -49,6 +49,12 @@ local Map = require("src.world.Map")
 
 local BattleScene = {}
 
+-- Loaded lazily: OverworldBattle requires this renderer while it is being
+-- constructed. Runtime draw/cast calls happen only after both modules exist,
+-- so the lazy edge avoids a load-time cycle and gives every battler provider
+-- the same scene seam Stadium previously occupied directly.
+local function battleBackend() return V.require("OverworldBattle") end
+
 -- The GB frame the battle screen is drawn in, and the frame BattleCam's rig
 -- is solved against.
 BattleScene.GB_W = 160
@@ -329,11 +335,12 @@ local function castShadows(state, arena, terrain, nbMesh, cx, cy, vw, vh,
   -- A DISC RUNG: the two discs are the only ground there is, so they are the
   -- only thing the sun has to see besides the Pokemon themselves. Everything
   -- below this is a map that is not in the shot.
-  if arena.discs then
-    pcall(function()
-      V.require("StadiumStage").cast(ShadowMap, arena, groundY or 0)
-    end)
-    pcall(function() V.require("Stadium").cast(ShadowMap) end)
+  if arena.stageReplacesMap or arena.discs then
+    battleBackend().stageCall("cast", ShadowMap, arena, groundY or 0)
+    battleBackend().battlerCall("cast", ShadowMap)
+    -- Custom models and effects may cast their own geometry. Every runtime
+    -- component gets the same shadow pass; slots without `cast` are no-ops.
+    battleBackend().componentsCall("cast", ShadowMap, arena, groundY or 0)
     ShadowMap.finish(sig)
     return
   end
@@ -377,7 +384,8 @@ local function castShadows(state, arena, terrain, nbMesh, cx, cy, vw, vh,
   -- the world -- a Gyarados at the water's edge should put a Gyarados on
   -- the water. Un-snugged for the same reason: snug is a bias for a card
   -- rooted to the ground plane, and a model has thickness of its own.
-  pcall(function() V.require("Stadium").cast(ShadowMap) end)
+  battleBackend().battlerCall("cast", ShadowMap)
+  battleBackend().componentsCall("cast", ShadowMap, arena, groundY or 0)
 
   ShadowMap.finish(sig)
 end
@@ -391,7 +399,7 @@ function BattleScene.groundY(map, arena)
   -- plane, so there is no terrain height to read and reading one would put
   -- the stage at whatever elevation the map happens to have at a spot the
   -- fight is not actually happening on
-  if arena and arena.discs then return 0 end
+  if arena and (arena.stageReplacesMap or arena.discs) then return 0 end
   local ok, h = pcall(VoxelScene.groundAt, map,
                       arena.playerCell[1], arena.playerCell[2])
   return (ok and h) or 0
@@ -497,7 +505,7 @@ function BattleScene.render(state, arena, textures, token)
   -- the letterbox, the camera solve, the sun, the pins, the tint, the depth
   -- of field -- because none of it is about the terrain; what changes is
   -- which geometry the two passes draw.
-  local discs = arena.discs and true or false
+  local discs = (arena.stageReplacesMap or arena.discs) and true or false
 
   -- shares the free-roam mode's request/evict bookkeeping, so a battle warms
   -- exactly the meshes walking around would have and nothing extra
@@ -523,13 +531,26 @@ function BattleScene.render(state, arena, textures, token)
   local cam, pitch = BattleCam.rig(arena, groundY)
   cam.fov = BattleScene.letterboxFov(cam.fov, ph, s)
 
+  -- A camera provider starts from the fully solved Dramaless camera instead
+  -- of rebuilding engine internals. It may replace the camera table, pitch,
+  -- and/or the world-frame height independently by returning nil for values
+  -- it wants to inherit. Runtime fallback is isolated to the camera slot.
+  local suppliedCam, suppliedPitch, suppliedFrameH =
+    battleBackend().componentCall("camera", "camera", cam, pitch, groundY, {
+      letterboxX = lx, letterboxY = ly, scale = s,
+      pixelWidth = pw, pixelHeight = ph,
+    })
+  if type(suppliedCam) == "table" then cam = suppliedCam end
+  if type(suppliedPitch) == "number" then pitch = suppliedPitch end
+
   local cx, cy = arena.mid[1], arena.mid[2]
   -- the world extents the sun frustum is fitted to; the camera itself is
   -- framed by cam.fov, so these only have to describe the ground in shot
   -- the player's zoom is part of this: the sun's box is fitted to what the
   -- frame holds, so a shot pulled wide has to light the ground it just
   -- brought into view rather than the ground the rig alone would have
-  local vh = BattleCam.frameH(arena) * ph / (BattleScene.GB_H * s)
+  local frameH = tonumber(suppliedFrameH) or BattleCam.frameH(arena)
+  local vh = frameH * ph / (BattleScene.GB_H * s)
   local vw = vh * pw / ph
 
   -- the cards need the camera's eye to face it, so the rig has to be live
@@ -615,7 +636,7 @@ function BattleScene.render(state, arena, textures, token)
       -- neighbouring maps, no water, no grass and no flowers -- see the
       -- matching skips further down. What is behind them is the sky the
       -- clear painted.
-      V.require("StadiumStage").draw(arena, groundY)
+      battleBackend().stageCall("draw", arena, groundY)
     else
       Voxel3D.draw(terrain, atlasFor(host), nil)
       for i, nb in ipairs(neighbors) do
@@ -695,15 +716,12 @@ function BattleScene.render(state, arena, textures, token)
     end
     Voxel3D.glass(true)
     Voxel3D.seams(true)
-    -- and the STADIUM models, inside the same flash window and with the
+    -- and the selected model provider, inside the same flash window and with the
     -- same camera-ward pull, so a Pokemon standing on its tile still wins
     -- the depth test against the tile. They manage the wireframe and the
     -- glass mask around their own draws (StadiumRig), which is why this
     -- sits outside the pair above rather than inside it.
-    local okStadium, stadiumErr = pcall(function()
-      V.require("Stadium").draw(BattleBillboard.PULL)
-    end)
-    if not okStadium then V.require("Stadium").report(stadiumErr) end
+    battleBackend().battlerCall("draw", BattleBillboard.PULL)
     if flashing then Voxel3D.flatten(nil) end
     -- grass and flowers ride the same camera-ward pull the free-roam pass
     -- gives them, measured against THIS camera's pitch rather than the
@@ -726,7 +744,21 @@ function BattleScene.render(state, arena, textures, token)
                     ShadowMap.snug(Mat4.translate(nb.ox, 0, nb.oy)))
       end
     end
+    -- World-space animations, particles, props and catch-all presentation
+    -- geometry draw after the stock arena and battlers, but before the scene
+    -- target is resolved. Providers use the same live Voxel3D state and may
+    -- manage their own depth-tested meshes through their own mod assets.
+    battleBackend().componentsCall("drawWorld", BattleBillboard.PULL,
+                                   arena, groundY)
     local canvas = AntiAlias.resolve(Voxel3D.endScene(), pw, ph, "battle")
+    if not canvas then return end
+    -- Post-processing providers are chained: each receives the canvas left by
+    -- the previous slot and may return a replacement target or nil to retain
+    -- it. This is after antialiasing and before the battle UI is composited.
+    canvas = battleBackend().worldPresent(canvas, arena, groundY, {
+      letterboxX = lx, letterboxY = ly, scale = s,
+      pixelWidth = pw, pixelHeight = ph,
+    })
     if not canvas then return end
 
     local vp = Voxel3D.vp
